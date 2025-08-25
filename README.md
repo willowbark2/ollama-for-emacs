@@ -25,7 +25,7 @@ df = pd.read_csv('data.csv')
 
 This will use the AI model to extract the model name `pandas` and the object type `pandas.core.frame.DataFrame`, then it prints the python doc string:
 ```shell
-python -c 'import pandas; print(pandas.core.frame.DataFrame.__doc__)'`
+python -c 'import pandas; print(pandas.core.frame.DataFrame.__doc__)'
 ```
 
 
