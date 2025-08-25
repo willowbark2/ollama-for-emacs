@@ -17,6 +17,117 @@
 (require 'json)
 (require 'subr-x)
 (require 'cl-lib)
+(require 'thingatpt)
+
+;(global-set-key "\C-p" 'thing-at-point--identifier)
+;(global-set-key (kbd "C-p") #'get-word-under-cursor)
+;(global-set-key (kbd "C-p") #'get-line-under-cursor)
+(global-set-key (kbd "C-p") #'py-help)
+
+
+(defun get-word-under-cursor ()
+  (thing-at-point 'symbol))
+
+(defun get-line-under-cursor ()
+  (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+
+(defun strip (text)
+  (replace-regexp-in-string "^[ \t\n\r]+\\|[ \t\n\r]+$" "" text))
+
+
+  (defun py-help-object-clean-ai-response (text)
+    (let* (
+           (text (strip text))
+           (text (when (string-prefix-p "```python\n" text) (substring text 10)))
+           (text (when (string-suffix-p "\n```" text) (substring text 0 -4)))
+           (text (strip text))
+           (text (when (string-prefix-p "<class '" text) (substring text 8)))
+           (text (when (string-suffix-p "'>" text) (substring text 0 -2))))
+      text))
+
+(defun py-help ()
+  (interactive)
+  (let* (
+      (object-at-point (get-word-under-cursor))
+      (current-line (get-line-under-cursor))
+      (prompt (format "Relevant object: `%s`\nRelevant line:\n```python\n%s\n```\n\nPretend you are a python interpreter. What type of object is `%s`?\nRespond with the exact python data type as returned by python's function, `type()`.\n```python\ntype(%s)\n```\nReturn your response as a code block in markdown format using three backticks." object-at-point current-line object-at-point object-at-point))
+      (ai-response (ollama-send-message prompt))
+      (object-type (py-help-object-clean-ai-response ai-response))
+      (python-module (car (split-string object-type "\\.")))
+      (help-text (shell-command-to-string (format "python3 -c 'import %s; print(%s.__doc__)'" python-module object-type)))
+      (buf (get-buffer-create (format "*help-%s*" object-at-point))))
+    (progn
+      (with-current-buffer buf
+        (erase-buffer)
+        (insert "\n\n")
+        (insert (format "LINE:    %s\n" current-line))
+        (insert (format "OBJECT:  %s\n" object-at-point))
+        (insert (format "MODULE:  %s\n" python-module))
+        (insert (format "TYPE:    %s\n" object-type))
+        (insert (format "\n\n>>> help(%s)\n\n" object-type))
+        (insert help-text))
+      (switch-to-buffer buf)
+      (goto-char (point-min)))))
+
+
+(defun ollama-send-message (prompt &optional system-message model host port)
+  "Send PROMPT to a local Ollama /api/chat endpoint using curl.
+Return the assistant's reply as a string, or nil on error."
+  (let* ((model (or model "qwen3-coder:30b"))
+         (host  (or host "localhost"))
+         (system-message (or system-message "You are an AI assistant."))
+         (port  (or port 11434))
+         (url   (format "http://%s:%s/api/chat" host port))
+         (history (vector
+                   `(("role" . "system")
+                     ("content" . system-message))
+                   `(("role" . "user")
+                     ("content" . ,prompt))))
+         (payload `(("model"    . ,model)
+                    ("messages" . ,history)
+                    ("stream"   . :json-false)
+                    ("options"  . (("temperature"   . 0.1)
+                                   ("repeat_last_n" . -1)
+                                   ("top_k"         . 10)
+                                   ("top_p"         . 0.95)))))
+         (json-request (json-encode payload))
+         (stdout-buf (generate-new-buffer " *ollama-curl*"))
+         (stderr-file (make-temp-file "ollama-stderr"))
+         reply)
+    (unwind-protect
+        (let ((exit-code
+               (with-temp-buffer
+                 (insert json-request)
+                 (call-process-region
+                  (point-min) (point-max)
+                  "curl" nil (list stdout-buf stderr-file) nil
+                  "-sS" "-f"
+                  "-H" "Content-Type: application/json"
+                  "-X" "POST" url
+                  "--data-binary" "@-"))))
+          (if (zerop exit-code)
+              (with-current-buffer stdout-buf
+                (let* ((json-object-type 'alist)
+                       (json-array-type 'list)
+                       (json (json-read-from-string (buffer-string)))
+                       (message-obj (alist-get 'message json))
+                       (content (alist-get 'content message-obj)))
+                  (setq reply (and (stringp content)
+                                   (string-trim content)))))
+            (let ((err (when (file-exists-p stderr-file)
+                         (with-temp-buffer
+                           (insert-file-contents stderr-file)
+                           (string-trim (buffer-string))))))
+              (message "Ollama API error: %s"
+                       (if (and err (not (string-empty-p err)))
+                           err
+                         "no details")))))
+      (when (buffer-live-p stdout-buf) (kill-buffer stdout-buf))
+      (when (file-exists-p stderr-file) (delete-file stderr-file)))
+    reply))
+
+
+
 
 (defgroup ollama-for-emacs nil
   "Stream code completions for the active region from an Ollama server."
@@ -39,11 +150,6 @@
   "Optional token limit for generation (nil lets the server decide)."
   :type '(choice (const :tag "Unlimited / server default" nil) integer)
   :group 'ollama-for-emacs)
-
-(defcustom ollama-for-emacs-code-only t
-  "When non-nil, remove prose/explanations from the generated block after extraction.
-Heuristic keeps comments, blanks, and code-ish lines."
-  :type 'boolean :group 'ollama-for-emacs)
 
 (defcustom allow-code-fences nil
   "If non-nil, allow Markdown code fences (```...```) to remain in final output."
@@ -70,8 +176,8 @@ Heuristic keeps comments, blanks, and code-ish lines."
   :type 'string :group 'ollama-for-emacs)
 
 (defcustom answer-close "\n</answer>"
-  "Closing XML marker inserted after streaming starts."
-  :type 'string :group 'ollama-for-emacs)
+"Closing XML marker inserted after streaming starts."
+:type 'string :group 'ollama-for-emacs)
 
 
 ;; -------- Internal state --------
@@ -114,7 +220,7 @@ Deletes all occurrences of these regions."
         (if (re-search-forward "^```[a-z]+$" nil t)
             (delete-region start (point))
           (delete-region start (point-max)))))
-    
+
     ;; Delete all ```
     (goto-char (point-min))
     (while (re-search-forward "^```$" nil t)
@@ -254,12 +360,11 @@ Deletes all occurrences of these regions."
                 (dolist (ln (split-string candidate "\n" -1))
                   (unless (gethash ln plines) (push ln kept)))
                 (setq candidate (mapconcat #'identity (nreverse kept) "\n")))
-              ;; optionally remove prose
-              (when ollama-for-emacs-code-only
-                (let ((kept '()))
-                  (dolist (ln (split-string candidate "\n" -1))
-                    (unless (ollama--prose-line-p ln) (push ln kept)))
-                  (setq candidate (mapconcat #'identity (nreverse kept) "\n"))))
+              ;; Remove prose/explanations from the generated block after extraction.
+              (let ((kept '()))
+                (dolist (ln (split-string candidate "\n" -1))
+                  (unless (ollama--prose-line-p ln) (push ln kept)))
+                (setq candidate (mapconcat #'identity (nreverse kept) "\n")))
               ;; trim extra blank lines
               (setq candidate (replace-regexp-in-string "\\`\\(\n\\)+" "" candidate))
               (setq candidate (replace-regexp-in-string "\\(\n\\)+\\'" "\n" candidate))
@@ -303,9 +408,7 @@ Deletes all occurrences of these regions."
   (ollama--postprocess)
   (ollama--cleanup msg)
   (tabify-multispaced-lines)
-  (if (eq ollama-for-emacs-code-only t)
-      (delete-code-fences))
-  )
+  (delete-code-fences))
 
 (defun ollama-stop-stream ()
   "Stop the current Ollama streaming completion."
@@ -352,7 +455,6 @@ Inserts tokens inside <thinking>…</thinking> placed after END.
 When done, removes <thinking>...```language\n and ```...</thinking>
 Press C-x g to stop streaming."
   (interactive "r")
-  (setq ollama-for-emacs-code-only t)
   (unless (use-region-p) (user-error "Select a region first"))
   (when (ollama--alive-p) (user-error "Another Ollama stream is already running"))
   (unless (executable-find "curl") (user-error "curl is required but was not found in PATH"))
@@ -437,6 +539,8 @@ Press C-x g to stop streaming."
       (define-key map (kbd "C-x g") #'ollama-stop-stream)
       (set-transient-map map (lambda () (ollama--alive-p))))
     (message "Ollama: streaming… press C-x g to stop.")))
+
+
 
 (provide 'ollama-for-emacs)
 
