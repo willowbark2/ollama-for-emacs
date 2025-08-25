@@ -19,12 +19,6 @@
 (require 'cl-lib)
 (require 'thingatpt)
 
-;(global-set-key "\C-p" 'thing-at-point--identifier)
-;(global-set-key (kbd "C-p") #'get-word-under-cursor)
-;(global-set-key (kbd "C-p") #'get-line-under-cursor)
-(global-set-key (kbd "C-p") #'py-help)
-
-
 (defun get-word-under-cursor ()
   (thing-at-point 'symbol))
 
