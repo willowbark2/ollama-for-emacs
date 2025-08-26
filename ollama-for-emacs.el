@@ -28,16 +28,14 @@
 (defun strip (text)
   (replace-regexp-in-string "^[ \t\n\r]+\\|[ \t\n\r]+$" "" text))
 
-
-  (defun py-help-object-clean-ai-response (text)
-    (let* (
-           (text (strip text))
-           (text (when (string-prefix-p "```python\n" text) (substring text 10)))
-           (text (when (string-suffix-p "\n```" text) (substring text 0 -4)))
-           (text (strip text))
-           (text (when (string-prefix-p "<class '" text) (substring text 8)))
-           (text (when (string-suffix-p "'>" text) (substring text 0 -2))))
-      text))
+(defun py-help-object-clean-ai-response (text)
+  (let* ((text (strip text))
+         (text (when (string-prefix-p "```python\n" text) (substring text 10)))
+         (text (when (string-suffix-p "\n```" text) (substring text 0 -4)))
+         (text (strip text))
+         (text (when (string-prefix-p "<class '" text) (substring text 8)))
+         (text (when (string-suffix-p "'>" text) (substring text 0 -2))))
+    text))
 
 (defun py-help ()
   (interactive)
@@ -64,19 +62,96 @@
       (goto-char (point-min)))))
 
 
-(defun ollama-send-message (prompt &optional system-message model host port)
+
+
+
+(defgroup ollama-for-emacs nil
+  "Stream code completions for the active region from an Ollama server."
+  :group 'tools
+  :prefix "ollama-for-emacs-")
+
+(defcustom host "http://localhost:11434"
+  "Base URL of the Ollama server."
+  :type 'string :group 'ollama-for-emacs)
+
+(defcustom model "qwen3-coder:30b"
+  "Default Ollama model to use for completions."
+  :type 'string :group 'ollama-for-emacs)
+
+(defcustom default-system-message
+  "You are an AI assistant."
+  ;; Info
+  "A system message in large language models is an initial prompt or instruction that sets the context, role, and behavior for the 
+AI assistant before any user interaction begins. It defines how the model should respond, what tone to use, what tasks it 
+should focus on, and other important guidelines. Think of it as the AI's \"personality\" or \"job description\" - it tells the 
+model how to approach conversations and what kind of responses to generate. For example, a system message might instruct the AI 
+to be helpful, concise, and professional, or to act as a creative writing assistant with specific style guidelines. The system message is prepended to the conversation history."
+  :type 'string :group 'ollama-for-emacs)
+
+(defcustom temperature 0.1
+  "Sampling temperature for the model."
+  :type 'number :group 'ollama-for-emacs)
+
+(defcustom max-tokens nil
+  "Optional token limit for generation (nil lets the server decide)."
+  :type '(choice (const :tag "Unlimited / server default" nil) integer)
+  :group 'ollama-for-emacs)
+
+(defcustom allow-code-fences nil
+  "If non-nil, allow Markdown code fences (```...```) to remain in final output."
+  :type 'boolean :group 'ollama-for-emacs)
+
+(defcustom preserve-tabs t
+  "If non-nil, convert leading indentation spaces to tabs in the generated text."
+  :type 'boolean :group 'ollama-for-emacs)
+
+(defcustom user-tab-width 4
+  "Tab width used when converting leading spaces to tabs in generated text."
+  :type 'integer :group 'ollama-for-emacs)
+
+(defcustom thinking-open "<thinking>\n"
+  "Opening XML marker inserted before streaming."
+  :type 'string :group 'ollama-for-emacs)
+
+(defcustom thinking-close "\n</thinking>"
+  "Closing XML marker inserted after streaming starts."
+  :type 'string :group 'ollama-for-emacs)
+
+(defcustom answer-open "\n<answer>\n"
+  "Opening XML marker inserted before streaming."
+  :type 'string :group 'ollama-for-emacs)
+
+(defcustom answer-close "\n</answer>"
+"Closing XML marker inserted after streaming starts."
+:type 'string :group 'ollama-for-emacs)
+
+
+;; -------- Internal state --------
+(defvar-local proc nil)
+(defvar-local partial "")
+(defvar-local origin-buffer nil)
+
+;; Markers for thinking tags + streamed area
+(defvar-local think-open-start nil)  ;; start of "<thinking>\n"
+(defvar-local insert-start nil)      ;; just after open tag (start of streamed content)
+(defvar-local insert-marker nil)     ;; moving insertion point (before close tag)
+(defvar-local think-close-start nil) ;; start of "</thinking>" tag
+
+;; Echo suppression
+(defvar-local skip-prefix nil)       ;; exact region text we sent
+(defvar-local skip-pos 0)
+
+(defun alive-p () (and proc (process-live-p proc)))
+(defun endpoint (path) (concat (string-remove-suffix "/" host) path))
+
+(defun ollama-send-message (prompt &optional system-message)
   "Send PROMPT to a local Ollama /api/chat endpoint using curl.
 Return the assistant's reply as a string, or nil on error."
-  (let* ((model (or model "qwen3-coder:30b"))
-         (host  (or host "localhost"))
-         (system-message (or system-message "You are an AI assistant."))
-         (port  (or port 11434))
-         (url   (format "http://%s:%s/api/chat" host port))
+  (let* ((system-message (or system-message default-system-message))
+         (url (format "%s/api/chat" host))
          (history (vector
-                   `(("role" . "system")
-                     ("content" . system-message))
-                   `(("role" . "user")
-                     ("content" . ,prompt))))
+                   `(("role" . "system") ("content" . ,system-message))
+                   `(("role" . "user")   ("content" . ,prompt))))
          (payload `(("model"    . ,model)
                     ("messages" . ,history)
                     ("stream"   . :json-false)
@@ -121,77 +196,6 @@ Return the assistant's reply as a string, or nil on error."
     reply))
 
 
-
-
-(defgroup ollama-for-emacs nil
-  "Stream code completions for the active region from an Ollama server."
-  :group 'tools
-  :prefix "ollama-for-emacs-")
-
-(defcustom ollama-host "http://localhost:11434"
-  "Base URL of the Ollama server."
-  :type 'string :group 'ollama-for-emacs)
-
-(defcustom ollama-model "qwen3-coder:30b"
-  "Default Ollama model to use for completions."
-  :type 'string :group 'ollama-for-emacs)
-
-(defcustom temperature 0.1
-  "Sampling temperature for the model."
-  :type 'number :group 'ollama-for-emacs)
-
-(defcustom ollama-max-tokens nil
-  "Optional token limit for generation (nil lets the server decide)."
-  :type '(choice (const :tag "Unlimited / server default" nil) integer)
-  :group 'ollama-for-emacs)
-
-(defcustom allow-code-fences nil
-  "If non-nil, allow Markdown code fences (```...```) to remain in final output."
-  :type 'boolean :group 'ollama-for-emacs)
-
-(defcustom preserve-tabs t
-  "If non-nil, convert leading indentation spaces to tabs in the generated text."
-  :type 'boolean :group 'ollama-for-emacs)
-
-(defcustom user-tab-width 4
-  "Tab width used when converting leading spaces to tabs in generated text."
-  :type 'integer :group 'ollama-for-emacs)
-
-(defcustom thinking-open "<thinking>\n"
-  "Opening XML marker inserted before streaming."
-  :type 'string :group 'ollama-for-emacs)
-
-(defcustom thinking-close "\n</thinking>"
-  "Closing XML marker inserted after streaming starts."
-  :type 'string :group 'ollama-for-emacs)
-
-(defcustom answer-open "\n<answer>\n"
-  "Opening XML marker inserted before streaming."
-  :type 'string :group 'ollama-for-emacs)
-
-(defcustom answer-close "\n</answer>"
-"Closing XML marker inserted after streaming starts."
-:type 'string :group 'ollama-for-emacs)
-
-
-;; -------- Internal state --------
-(defvar-local ollama--proc nil)
-(defvar-local ollama--partial "")
-(defvar-local ollama--origin-buffer nil)
-
-;; Markers for thinking tags + streamed area
-(defvar-local ollama--think-open-start nil)  ;; start of "<thinking>\n"
-(defvar-local ollama--insert-start nil)      ;; just after open tag (start of streamed content)
-(defvar-local ollama--insert-marker nil)     ;; moving insertion point (before close tag)
-(defvar-local ollama--think-close-start nil) ;; start of "</thinking>" tag
-
-;; Echo suppression
-(defvar-local ollama--skip-prefix nil)       ;; exact region text we sent
-(defvar-local ollama--skip-pos 0)
-
-(defun ollama--alive-p () (and ollama--proc (process-live-p ollama--proc)))
-(defun ollama--endpoint (path) (concat (string-remove-suffix "/" ollama-host) path))
-
 (defun insert-to-new-buffer (text buffer-name)
   "Insert TEXT into new BUFFER-NAME."
   (switch-to-buffer (get-buffer-create buffer-name))
@@ -232,54 +236,54 @@ Deletes all occurrences of these regions."
         (tabify (line-beginning-position) (line-end-position)))
       (forward-line 1))))
 
-(defun ollama--insert-thinking-tags (pos)
+(defun insert-thinking-tags (pos)
   "Insert <thinking> and </thinking> at POS and set markers so streaming happens between them."
-  (with-current-buffer ollama--origin-buffer
+  (with-current-buffer origin-buffer
     (save-excursion
       (goto-char pos)
       (insert thinking-open)
-      (setq ollama--think-open-start (copy-marker (- (point) (length thinking-open))))
-      (setq ollama--insert-start     (copy-marker (point)))
+      (setq think-open-start (copy-marker (- (point) (length thinking-open))))
+      (setq insert-start     (copy-marker (point)))
       (insert thinking-close)
-      (setq ollama--think-close-start (copy-marker (- (point) (length thinking-close))))
-      (setq ollama--insert-marker     (copy-marker ollama--think-close-start t)))))
+      (setq think-close-start (copy-marker (- (point) (length thinking-close))))
+      (setq insert-marker     (copy-marker think-close-start t)))))
 
-(defun ollama--insert-answer-tags (pos)
+(defun insert-answer-tags (pos)
   "Insert <answer> and </answer> at POS and set markers so streaming happens between them."
-  (with-current-buffer ollama--origin-buffer
+  (with-current-buffer origin-buffer
     (save-excursion
       (goto-char pos)
       (insert answer-open)
-      (setq ollama--think-open-start (copy-marker (- (point) (length answer-open))))
-      (setq ollama--insert-start     (copy-marker (point)))
+      (setq think-open-start (copy-marker (- (point) (length answer-open))))
+      (setq insert-start     (copy-marker (point)))
       (insert answer-close)
-      (setq ollama--think-close-start (copy-marker (- (point) (length answer-close))))
-      (setq ollama--insert-marker     (copy-marker ollama--think-close-start t)))))
+      (setq think-close-start (copy-marker (- (point) (length answer-close))))
+      (setq insert-marker     (copy-marker think-close-start t)))))
 
 
 (defun ollama--insert (text)
-  (when (and (markerp ollama--insert-marker) (buffer-live-p ollama--origin-buffer))
-    (with-current-buffer ollama--origin-buffer
+  (when (and (markerp insert-marker) (buffer-live-p origin-buffer))
+    (with-current-buffer origin-buffer
       (let ((inhibit-read-only t))
         (save-excursion
-          (goto-char ollama--insert-marker)
+          (goto-char insert-marker)
           (insert text)
-          (set-marker ollama--insert-marker (point)))))))
+          (set-marker insert-marker (point)))))))
 
-(defun ollama--consume-echo (s)
+(defun consume-echo (s)
   "Consume leading echo of the prompt from S (only at the beginning of the stream)."
   (let ((pos 0) (len (length s)))
-    (when (and ollama--skip-prefix (< ollama--skip-pos (length ollama--skip-prefix)))
-      (let ((limit (min len (- (length ollama--skip-prefix) ollama--skip-pos))))
+    (when (and skip-prefix (< skip-pos (length skip-prefix)))
+      (let ((limit (min len (- (length skip-prefix) skip-pos))))
         (while (and (< pos limit)
                     (eq (aref s pos)
-                        (aref ollama--skip-prefix (+ ollama--skip-pos pos))))
+                        (aref skip-prefix (+ skip-pos pos))))
           (setq pos (1+ pos))))
-      (setq ollama--skip-pos (+ ollama--skip-pos pos)))
+      (setq skip-pos (+ skip-pos pos)))
     (substring s pos)))
 
 ;; -------- Post-processing helpers --------
-(defun ollama--first-fenced-slice (text)
+(defun first-fenced-slice (text)
   "Return (START . END) of first ```...``` fenced block in TEXT, or nil."
   (let ((open (string-match "```" text)))
     (when open
@@ -290,7 +294,7 @@ Deletes all occurrences of these regions."
         (when (and close (> close content-start))
           (cons content-start close))))))
 
-(defun ollama--drop-fence-lines (s)
+(defun drop-fence-lines (s)
   "Remove any lines containing triple backticks from S unless fences are allowed."
   (if allow-code-fences s
     (let ((out '()))
@@ -298,13 +302,13 @@ Deletes all occurrences of these regions."
         (unless (string-match-p "```" ln) (push ln out)))
       (mapconcat #'identity (nreverse out) "\n"))))
 
-(defun ollama--prompt-line-set (prompt)
+(defun prompt-line-set (prompt)
   "Hash set of lines in PROMPT for exact-equality echo removal."
   (let ((h (make-hash-table :test 'equal)))
     (dolist (ln (split-string (or prompt "") "\n" -1)) (puthash ln t h))
     h))
 
-(defun ollama--prose-line-p (line)
+(defun prose-line-p (line)
   "Heuristic: returns t if LINE is likely prose, not code."
   (let* ((trim (string-trim-right line))
          (raw  (string-trim-left trim)))
@@ -317,7 +321,7 @@ Deletes all occurrences of these regions."
      ((string-match-p "[(){}\\[\\]:=;,.<>+\\-/*%]" raw) nil)
      (t (let ((words (split-string raw "[ \t]+" t))) (>= (length words) 4))))))
 
-(defun ollama--retabify (beg end)
+(defun retabify (beg end)
   (when (and preserve-tabs (< beg end))
     (save-restriction
       (narrow-to-region beg end)
@@ -330,26 +334,26 @@ Deletes all occurrences of these regions."
           (forward-line 1))))))
 
 ;; -------- Post-processing pipeline --------
-(defun ollama--postprocess ()
+(defun postprocess ()
   "Keep only first fenced code block inside <thinking>…</thinking>, strip fences/prose/echo, preserve tabs."
-  (when (and (markerp ollama--think-open-start)
-             (markerp ollama--insert-start)
-             (markerp ollama--think-close-start)
-             (buffer-live-p ollama--origin-buffer))
-    (with-current-buffer ollama--origin-buffer
-      (let ((beg (marker-position ollama--insert-start))
-            (end (marker-position ollama--think-close-start)))
+  (when (and (markerp think-open-start)
+             (markerp insert-start)
+             (markerp think-close-start)
+             (buffer-live-p origin-buffer))
+    (with-current-buffer origin-buffer
+      (let ((beg (marker-position insert-start))
+            (end (marker-position think-close-start)))
         (when (and beg end (< beg end))
           (save-excursion
             (let* ((raw (buffer-substring-no-properties beg end))
-                   (slice (ollama--first-fenced-slice raw))
+                   (slice (first-fenced-slice raw))
                    (candidate (if slice
                                   (substring raw (car slice) (cdr slice))
                                 raw)))
               ;; remove any fence lines inside the candidate unless allowed
-              (setq candidate (ollama--drop-fence-lines candidate))
+              (setq candidate (drop-fence-lines candidate))
               ;; drop lines that exactly echo the prompt
-              (let ((plines (ollama--prompt-line-set ollama--skip-prefix))
+              (let ((plines (prompt-line-set skip-prefix))
                     (kept '()))
                 (dolist (ln (split-string candidate "\n" -1))
                   (unless (gethash ln plines) (push ln kept)))
@@ -357,7 +361,7 @@ Deletes all occurrences of these regions."
               ;; Remove prose/explanations from the generated block after extraction.
               (let ((kept '()))
                 (dolist (ln (split-string candidate "\n" -1))
-                  (unless (ollama--prose-line-p ln) (push ln kept)))
+                  (unless (prose-line-p ln) (push ln kept)))
                 (setq candidate (mapconcat #'identity (nreverse kept) "\n")))
               ;; trim extra blank lines
               (setq candidate (replace-regexp-in-string "\\`\\(\n\\)+" "" candidate))
@@ -368,38 +372,38 @@ Deletes all occurrences of these regions."
               (insert candidate)
               (let ((new-end (+ beg (length candidate))))
                 ;; retabify only the inserted block
-                (ollama--retabify beg new-end))
+                (retabify beg new-end))
               ;; finally remove </thinking> and <thinking>
-              (let* ((close-beg (marker-position ollama--think-close-start))
+              (let* ((close-beg (marker-position think-close-start))
                      (close-len (length thinking-close)))
                 (when close-beg (delete-region close-beg (+ close-beg close-len))))
-              (let* ((open-beg (marker-position ollama--think-open-start))
-                     (open-end (marker-position ollama--insert-start)))
+              (let* ((open-beg (marker-position think-open-start))
+                     (open-end (marker-position insert-start)))
                 (when (and open-beg open-end) (delete-region open-beg open-end))))))))))
 
 ;; -------- Process lifecycle --------
 (defun ollama--cleanup (&optional msg)
-  (when (ollama--alive-p) (ignore-errors (delete-process ollama--proc)))
-  (setq ollama--proc nil
-        ollama--partial ""
-        ollama--origin-buffer nil
-        ollama--skip-prefix nil
-        ollama--skip-pos 0)
+  (when (alive-p) (ignore-errors (delete-process proc)))
+  (setq proc nil
+        partial ""
+        origin-buffer nil
+        skip-prefix nil
+        skip-pos 0)
   (dolist (m (list
-              ollama--think-open-start
-              ollama--insert-start
-              ollama--insert-marker
-              ollama--think-close-start))
+              think-open-start
+              insert-start
+              insert-marker
+              think-close-start))
     (when (markerp m) (set-marker m nil)))
-  (setq ollama--think-open-start nil
-        ollama--insert-start nil
-        ollama--insert-marker nil
-        ollama--think-close-start nil)
+  (setq think-open-start nil
+        insert-start nil
+        insert-marker nil
+        think-close-start nil)
   (when msg (message "%s" msg)))
 
-(defun ollama--finish (&optional msg)
+(defun finish (&optional msg)
   "Finish processing"
-  (ollama--postprocess)
+  (postprocess)
   (ollama--cleanup msg)
   (tabify-multispaced-lines)
   (delete-code-fences))
@@ -407,22 +411,22 @@ Deletes all occurrences of these regions."
 (defun ollama-stop-stream ()
   "Stop the current Ollama streaming completion."
   (interactive)
-  (if (ollama--alive-p)
-      (ollama--finish "Ollama stream stopped.")
+  (if (alive-p)
+      (finish "Ollama stream stopped.")
     (message "No Ollama stream is running.")))
 
-(defun ollama--process-sentinel (_proc event)
+(defun process-sentinel (_proc event)
   (let ((msg (string-trim event)))
     (unless (string-empty-p msg)
       (message "Ollama: %s" msg))))
 
-(defun ollama--process-filter (_proc chunk)
+(defun process-filter (_proc chunk)
   "Handle streaming NDJSON from curl."
-  (setq ollama--partial (concat ollama--partial chunk))
-  (let* ((parts (split-string ollama--partial "\n"))
+  (setq partial (concat partial chunk))
+  (let* ((parts (split-string partial "\n"))
          (lines (butlast parts))
          (remainder (car (last parts))))
-    (setq ollama--partial remainder)
+    (setq partial remainder)
     (dolist (line lines)
       (let ((s (string-trim-right line)))
         (unless (string-empty-p s)
@@ -434,12 +438,12 @@ Deletes all occurrences of these regions."
               (let ((resp (alist-get "response" obj nil nil #'string=))
                     (done (alist-get "done"     obj nil nil #'string=))
                     (err  (alist-get "error"    obj nil nil #'string=)))
-                (when err (ollama--finish (format "Ollama error: %s" err)))
+                (when err (finish (format "Ollama error: %s" err)))
                 (when resp
-                  (let ((emit (ollama--consume-echo resp)))
+                  (let ((emit (consume-echo resp)))
                     (when (> (length emit) 0)
                       (ollama--insert emit))))
-                (when (eq done t) (ollama--finish "Ollama: done."))
+                (when (eq done t) (finish "Ollama: done."))
                 ))))))))
 
 
@@ -450,42 +454,42 @@ When done, removes <thinking>...```language\n and ```...</thinking>
 Press C-x g to stop streaming."
   (interactive "r")
   (unless (use-region-p) (user-error "Select a region first"))
-  (when (ollama--alive-p) (user-error "Another Ollama stream is already running"))
+  (when (alive-p) (user-error "Another Ollama stream is already running"))
   (unless (executable-find "curl") (user-error "curl is required but was not found in PATH"))
   (let* ((region-text (buffer-substring-no-properties beg end))
          (options
           (delq nil
                 (list
                  (cons "temperature" temperature)
-                 (when ollama-max-tokens
-                   (cons "num_predict" ollama-max-tokens)))))
+                 (when max-tokens
+                   (cons "num_predict" max-tokens)))))
          (payload (json-encode
-                   (list (cons "model"   ollama-model)
+                   (list (cons "model"   model)
                          (cons "prompt"  region-text)
                          (cons "stream"  t)
                          (cons "options" options))))
-         (url (ollama--endpoint "/api/generate"))
+         (url (endpoint "/api/generate"))
          (cmd `("curl" "-sS" "--no-buffer" "-X" "POST" "-H" "Content-Type: application/json" "-d" ,payload ,url))
          (tmp-buf (generate-new-buffer " *ollama-for-emacs*")))
-    (setq ollama--origin-buffer (current-buffer))
+    (setq origin-buffer (current-buffer))
     ;; Insert XML tags and stream between them
-    (ollama--insert-thinking-tags end)
-    (setq ollama--partial "" ollama--skip-prefix region-text ollama--skip-pos 0)
-    (setq ollama--proc
+    (insert-thinking-tags end)
+    (setq partial "" skip-prefix region-text skip-pos 0)
+    (setq proc
           (make-process
            :name "ollama-for-emacs"
            :buffer tmp-buf
            :command cmd
            :connection-type 'pipe
            :noquery t
-           :filter #'ollama--process-filter
+           :filter #'process-filter
            :sentinel (lambda (p e)
                        (when (buffer-live-p tmp-buf) (kill-buffer tmp-buf))
-                       (ollama--process-sentinel p e))))
+                       (process-sentinel p e))))
     ;; Cancel key: C-x g
     (let ((map (make-sparse-keymap)))
       (define-key map (kbd "C-x g") #'ollama-stop-stream)
-      (set-transient-map map (lambda () (ollama--alive-p))))
+      (set-transient-map map (lambda () (alive-p))))
     (message "Ollama: streaming… press C-x g to stop.")))
 
 
@@ -493,46 +497,47 @@ Press C-x g to stop streaming."
   "Ask the LLM a question. Press C-x g to stop streaming."
   (interactive "r")
   (unless (use-region-p) (user-error "Select a region first"))
-  (when (ollama--alive-p) (user-error "Another Ollama stream is already running"))
+  (when (alive-p) (user-error "Another Ollama stream is already running"))
   (unless (executable-find "curl") (user-error "curl is required but was not found in PATH"))
   (let* ((region-text (buffer-substring-no-properties beg end))
          (options
           (delq nil
                 (list
                  (cons "temperature" temperature)
-                 (when ollama-max-tokens
-                   (cons "num_predict" ollama-max-tokens)))))
+                 (when max-tokens
+                   (cons "num_predict" max-tokens)))))
          (payload
           (json-encode
-           (list (cons "model"   ollama-model)
+           (list (cons "model"   model)
                  (cons "prompt"  region-text)
                  (cons "stream"  t)
                  (cons "options" options))))
-         (url (ollama--endpoint "/api/generate"))
+         (url (endpoint "/api/generate"))
          (cmd `("curl" "-sS" "--no-buffer" "-X" "POST" "-H" "Content-Type: application/json" "-d" ,payload ,url))
          (tmp-buf (generate-new-buffer " *ollama-for-emacs*")))
     (setq answer-buffer (get-buffer-create "*answer*"))
     (switch-to-buffer answer-buffer)
-    (setq ollama--origin-buffer answer-buffer)
+    (setq origin-buffer answer-buffer)
     ;; Insert XML tags and stream between them
-    (ollama--insert-answer-tags end)
-    (setq ollama--partial "" ollama--skip-prefix region-text ollama--skip-pos 0)
-    (setq ollama--proc
+    (insert-answer-tags end)
+    (setq partial "" skip-prefix region-text skip-pos 0)
+    (setq proc
           (make-process
            :name "ollama-ask"
            :buffer tmp-buf
            :command cmd
            :connection-type 'pipe
            :noquery t
-           :filter #'ollama--process-filter
+           :filter #'process-filter
            :sentinel (lambda (p e)
                        (when (buffer-live-p tmp-buf) (kill-buffer tmp-buf))
-                       (ollama--process-sentinel p e))))
+                       (process-sentinel p e))))
     ;; Cancel key: C-x g
     (let ((map (make-sparse-keymap)))
       (define-key map (kbd "C-x g") #'ollama-stop-stream)
-      (set-transient-map map (lambda () (ollama--alive-p))))
+      (set-transient-map map (lambda () (alive-p))))
     (message "Ollama: streaming… press C-x g to stop.")))
+
 
 
 

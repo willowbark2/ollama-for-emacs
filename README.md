@@ -41,8 +41,10 @@ Add the following to your `~/.emacs` file.
 
 Set the following options to suit your needs:
 ```lisp
-  (global-set-key (kbd "C-p") #'py-help)
   (setq ollama-for-emacs-host "http://localhost:11434")
   (setq ollama-for-emacs-model "qwen3-coder:30b")
   (setq ollama-for-emacs-temperature 0.1)
+
+(add-hook 'python-mode-hook (lambda ()
+  (global-set-key (kbd "C-p") #'py-help)))
 ```
